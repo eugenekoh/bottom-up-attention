@@ -101,3 +101,9 @@ LOCK
 LOG*
 CURRENT
 MANIFEST-*
+
+# Others
+data/features/*
+yfcc_images/*
+*.caffemodel
+*.pkl
