@@ -15,6 +15,7 @@ from fast_rcnn.test import im_detect,_get_blobs
 from fast_rcnn.nms_wrapper import nms
 from utils.timer import Timer
 
+
 import pickle
 import caffe
 import argparse
@@ -25,11 +26,12 @@ import base64
 import numpy as np
 import cv2
 import csv
-from multiprocessing import Process
+from concurrent import futures
 import random
 import os
 import pprint
 import tqdm
+from collections import deque
 
 csv.field_size_limit(sys.maxsize)
 
@@ -128,7 +130,7 @@ def parse_args():
 
     parser = argparse.ArgumentParser(description='Generate bbox output from a Fast R-CNN network')
     parser.add_argument('--gpu', dest='gpu_id', help='GPU id(s) to use',
-                        default='0,1,2', type=str)
+                        default='0', type=str)
     parser.add_argument('--def', dest='prototxt',
                         help='prototxt file defining the network',
                         default='models/vg/ResNet-101/faster_rcnn_end2end_final/test.prototxt', type=str)
@@ -151,39 +153,45 @@ def parse_args():
     return args
 
 
-def generate_tsv(gpu_id, prototxt, weights, image_ids, features_file, labels_file, errors_file):
-    
-    wanted = set(x[1] for x in image_ids)
+if __name__ == '__main__':
 
+    args = parse_args()
+
+    # setup cfg
+    if args.cfg_file is not None:
+        cfg_from_file(args.cfg_file)
+    if args.set_cfgs is not None:
+        cfg_from_list(args.set_cfgs)
+    assert cfg.TEST.HAS_RPN
+
+    # get missing images
     found_ids = set()
     if os.path.exists(features_file):
         with open(features_file) as tsvfile:
             reader = csv.DictReader(tsvfile, delimiter='\t', fieldnames = FIELDNAMES)
             found_ids = set(x['image_id'] for x in reader)
 
-    errors = set()
-    if os.path.exists(errors_file):
-        with open(errors_file) as csvfile:
-            reader = csv.reader(csvfile)
-            errors = set(x[0] for x in reader)
+    image_ids = []
+    for f in os.listdir(args.image_path):
+        image_id = f.split('.')[0]
+        filepath = os.path.join(args.image_path, f)
+        if image_id not in found_ids:
+            image_ids.append((filepath, image_id))
+        
+    print('missing images:' , len(image_ids))
+    random.shuffle(image_ids)
+    time.sleep(3)
 
-    missing = wanted - found_ids - errors
-    
-    if len(missing) == 0:
-        print 'GPU {:d}: already completed {:d}'.format(gpu_id, len(image_ids))
-    else:
-        print 'GPU {:d}: missing {:d}/{:d}, errors:{:d}'.format(gpu_id, len(missing), len(wanted), len(errors))
-
+    # setup gpu
+    caffe.init_log()
     caffe.set_mode_gpu()
     caffe.set_device(gpu_id)
-    net = caffe.Net(prototxt, caffe.TEST, weights=weights)
+    net = caffe.Net(args.prototxt, caffe.TEST, weights=args.caffemodel)
 
-    missing_items = [x for x in image_ids if x[1] in missing]
-    
-    with open(features_file, 'ab') as tsvfile, open(labels_file, 'ab') as labeltsvfile, open(errors_file, 'a') as csvfile:
-        writer = csv.DictWriter(tsvfile, delimiter = '\t', fieldnames = FIELDNAMES)
-        Labelwriter = csv.DictWriter(labeltsvfile, delimiter = '\t',fieldnames = LABELNAMES)
-        error_writer = csv.writer(csvfile)
+    # multiprocessing
+    with open(features_file, 'ab') as tsvfile, open(labels_file, 'ab') as labeltsvfile:
+        feature_writer = csv.DictWriter(tsvfile, delimiter = '\t', fieldnames = FIELDNAMES)
+        label_writer = csv.DictWriter(labeltsvfile, delimiter = '\t',fieldnames = LABELNAMES)
 
         for im_file,image_id in tqdm.tqdm(missing_items):
             try:
@@ -191,62 +199,11 @@ def generate_tsv(gpu_id, prototxt, weights, image_ids, features_file, labels_fil
             except:
                 error = 'exception error for {}'.format(im_file)
                 tqdm.tqdm.write(error)
-                error_writer.writerow([image_id, error])
                 continue
             if X is None:
                 error = 'empty image for {}'.format(im_file)
                 tqdm.tqdm.write(error)
-                error_writer.writerow([image_id, error])
                 continue
 
-            writer.writerow(X[0])
-            Labelwriter.writerow(X[1])
-
-if __name__ == '__main__':
-
-    args = parse_args()
-
-    print('Called with args:')
-    print(args)
-
-    if args.cfg_file is not None:
-        cfg_from_file(args.cfg_file)
-    if args.set_cfgs is not None:
-        cfg_from_list(args.set_cfgs)
-
-    gpu_id = args.gpu_id
-    gpu_list = gpu_id.split(',')
-    gpus = [int(i) for i in gpu_list]
-    print(gpus)
-    print('Using config:')
-    pprint.pprint(cfg)
-    assert cfg.TEST.HAS_RPN
-
-    ''' Load a list of (path,image_id tuples). Modify this to suit your data locations. '''
-    image_ids = []
-    files = os.listdir(args.image_path)
-    for f in files:
-        image_id = f.split('.')[0]
-        filepath = os.path.join(args.image_path, f)
-        image_ids.append((filepath, image_id))
-        
-    print('missing images:' , len(image_ids))
-
-    # Split image ids between gpus
-    image_ids = [image_ids[i::len(gpus)] for i in range(len(gpus))]
-
-    caffe.init_log()
-    caffe.log('Using devices %s' % str(gpus))
-    procs = []
-
-    for i,gpu_id in enumerate(gpus):
-        features_file = '%s.%d' % (args.features_file, gpu_id)
-        labels_file = '%s.%d' % (args.labels_file, gpu_id)
-        errors_file = '%s.%d' % (args.errors_file, gpu_id)
-        p = Process(target=generate_tsv,
-                    args=(gpu_id, args.prototxt, args.caffemodel, image_ids[i], features_file, labels_file, errors_file))
-        p.daemon = True
-        p.start()
-        procs.append(p)
-    for p in procs:
-        p.join()
+            feature_writer.writerow(X[0])
+            label_writer.writerow(X[1])

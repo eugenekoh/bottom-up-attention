@@ -1,12 +1,14 @@
 import csv
 import sys
 import tqdm
+import os
+import pickle
 csv.field_size_limit(sys.maxsize)
 
 FIELDNAMES = ['image_id', 'images']
 LABELNAMES = ['image_id', 'list']
 found_ids = set()
-features_file = 'data/features/yfcc.tsv.0'
+features_file = 'data/features/yfcc.tsv'
 with open(features_file) as tsvfile:
     reader = csv.DictReader(tsvfile, delimiter='\t', fieldnames = FIELDNAMES)
     with tqdm.tqdm(total=220000) as pbar:
